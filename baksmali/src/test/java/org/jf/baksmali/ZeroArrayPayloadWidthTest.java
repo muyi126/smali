@@ -1,5 +1,5 @@
 /*
- * Copyright 2013, Google Inc.
+ * Copyright 2019, Google Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,38 +29,16 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-package org.jf.dexlib2.dexbacked.raw;
+package org.jf.baksmali;
 
-import org.jf.dexlib2.Opcodes;
-import org.jf.dexlib2.dexbacked.BaseDexBuffer;
-import org.jf.dexlib2.dexbacked.DexBackedDexFile;
-import org.jf.dexlib2.util.AnnotatedBytes;
+import org.junit.Test;
 
-import javax.annotation.Nonnull;
-import java.io.IOException;
-import java.io.Writer;
-import java.util.Arrays;
+public class ZeroArrayPayloadWidthTest extends DisassemblyTest {
 
-public class RawDexFile extends DexBackedDexFile {
-    @Nonnull public final HeaderItem headerItem;
-
-    public RawDexFile(@Nonnull Opcodes opcodes, @Nonnull BaseDexBuffer buf) {
-        super(opcodes, buf);
-        this.headerItem = new HeaderItem(this);
-    }
-
-    public RawDexFile(@Nonnull Opcodes opcodes, @Nonnull byte[] buf) {
-        super(opcodes, buf);
-        this.headerItem = new HeaderItem(this);
-    }
-
-    @Nonnull
-    public byte[] readByteRange(int start, int length) {
-        return Arrays.copyOfRange(getBuf(), getBaseOffset() + start, getBaseOffset() + start + length);
-    }
-
-    public void writeAnnotations(@Nonnull Writer out, @Nonnull AnnotatedBytes annotatedBytes) throws IOException {
-        // TODO: need to pass in the offset
-        annotatedBytes.writeAnnotations(out, getBuf());
+    @Test
+    public void testZeroArrayPayloadWidthTest() {
+        // This test uses a manually modified dex file with an array-payload instruction that has an element size of 0,
+        // and an element count that doesn't fit in an unsigned int.
+        runTest("ZeroArrayPayloadWidthTest");
     }
 }

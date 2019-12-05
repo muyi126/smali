@@ -35,11 +35,12 @@ import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.io.ByteStreams;
+import org.jf.dexlib2.DexFileFactory;
 import org.jf.dexlib2.Opcodes;
-import org.jf.dexlib2.dexbacked.OatFile.OatDexFile;
 import org.jf.dexlib2.dexbacked.OatFile.SymbolTable.Symbol;
 import org.jf.dexlib2.dexbacked.raw.HeaderItem;
 import org.jf.dexlib2.iface.MultiDexContainer;
+import org.jf.dexlib2.util.DexUtil;
 import org.jf.util.AbstractForwardSequentialList;
 
 import javax.annotation.Nonnull;
@@ -48,12 +49,9 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
-import java.util.AbstractList;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
 
-public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFile> {
+public class OatFile extends DexBuffer implements MultiDexContainer<DexBackedDexFile> {
     private static final byte[] ELF_MAGIC = new byte[] { 0x7f, 'E', 'L', 'F' };
     private static final byte[] OAT_MAGIC = new byte[] { 'o', 'a', 't', '\n' };
     private static final int MIN_ELF_HEADER_SIZE = 52;
@@ -61,7 +59,7 @@ public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFi
     // These are the "known working" versions that I have manually inspected the source for.
     // Later version may or may not work, depending on what changed.
     private static final int MIN_OAT_VERSION = 56;
-    private static final int MAX_OAT_VERSION = 86;
+    private static final int MAX_OAT_VERSION = 173;
 
     public static final int UNSUPPORTED = 0;
     public static final int SUPPORTED = 1;
@@ -178,18 +176,20 @@ public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFi
     }
 
     @Nonnull
-    public List<OatDexFile> getDexFiles() {
-        return new AbstractForwardSequentialList<OatDexFile>() {
+    public List<DexBackedDexFile> getDexFiles() {
+        return new AbstractForwardSequentialList<DexBackedDexFile>() {
             @Override public int size() {
-                return oatHeader.getDexFileCount();
+                return Iterators.size(Iterators.filter(new DexEntryIterator(), Objects::nonNull));
             }
 
-            @Nonnull @Override public Iterator<OatDexFile> iterator() {
-                return Iterators.transform(new DexEntryIterator(), new Function<DexEntry, OatDexFile>() {
-                    @Nullable @Override public OatDexFile apply(DexEntry dexEntry) {
-                        return dexEntry.getDexFile();
-                    }
-                });
+            @Nonnull @Override public Iterator<DexBackedDexFile> iterator() {
+                return Iterators.transform(
+                    Iterators.filter(new DexEntryIterator(), Objects::nonNull),
+                        new Function<OatDexEntry, DexBackedDexFile>() {
+                            @Nullable @Override public DexBackedDexFile apply(OatDexEntry dexEntry) {
+                                return dexEntry.getDexFile();
+                            }
+                        });
             }
         };
     }
@@ -197,48 +197,50 @@ public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFi
     @Nonnull @Override public List<String> getDexEntryNames() throws IOException {
         return new AbstractForwardSequentialList<String>() {
             @Override public int size() {
-                return oatHeader.getDexFileCount();
+                return Iterators.size(Iterators.filter(new DexEntryIterator(), Objects::nonNull));
             }
 
             @Nonnull @Override public Iterator<String> iterator() {
-                return Iterators.transform(new DexEntryIterator(), new Function<DexEntry, String>() {
-                    @Nullable @Override public String apply(DexEntry dexEntry) {
-                        return dexEntry.entryName;
-                    }
-                });
+                return Iterators.transform(
+                    Iterators.filter(new DexEntryIterator(), Objects::nonNull),
+                        new Function<OatDexEntry, String>() {
+                            @Nullable @Override public String apply(OatDexEntry dexEntry) {
+                                return dexEntry.entryName;
+                            }
+                        });
             }
         };
     }
 
-    @Nullable @Override public OatDexFile getEntry(@Nonnull String entryName) throws IOException {
+    @Nullable
+    @Override
+    public OatDexEntry getEntry(@Nonnull String entryName) throws IOException {
         DexEntryIterator iterator = new DexEntryIterator();
         while (iterator.hasNext()) {
-            DexEntry entry = iterator.next();
-
-            if (entry.entryName.equals(entryName)) {
-                return entry.getDexFile();
+            OatDexEntry entry = iterator.next();
+            if (entry != null && entry.getEntryName().equals(entryName)) {
+                return entry;
             }
         }
         return null;
     }
 
-    public class OatDexFile extends DexBackedDexFile implements MultiDexContainer.MultiDexFile {
-        @Nonnull public final String filename;
-
-        public OatDexFile(byte[] buf, int offset, @Nonnull String filename) {
+    public class OatDexFile extends DexBackedDexFile {
+        public OatDexFile(@Nonnull byte[] buf, int offset) {
             super(opcodes, buf, offset);
-            this.filename = filename;
         }
 
-        @Nonnull @Override public String getEntryName() {
-            return filename;
+        @Override public boolean supportsOptimizedOpcodes() {
+            return true;
+        }
+    }
+
+    public class OatCDexFile extends CDexBackedDexFile {
+        public OatCDexFile(byte[] buf, int offset) {
+            super(opcodes, buf, offset);
         }
 
-        @Nonnull @Override public OatFile getContainer() {
-            return OatFile.this;
-        }
-
-        @Override public boolean hasOdexOpcodes() {
+        @Override public boolean supportsOptimizedOpcodes() {
             return true;
         }
     }
@@ -249,7 +251,13 @@ public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFi
 
         public OatHeader(int offset) {
             this.headerOffset = offset;
-            if (getVersion() >= 127) {
+            if (getVersion() >= 170) {
+                this.keyValueStoreOffset = 14 * 4;
+            } else if (getVersion() >= 166) {
+                this.keyValueStoreOffset = 16 * 4;
+            } else if (getVersion() >= 162) {
+                this.keyValueStoreOffset = 17 * 4;
+            } else if (getVersion() >= 127) {
                 this.keyValueStoreOffset = 19 * 4;
             } else {
                 this.keyValueStoreOffset = 18 * 4;
@@ -556,24 +564,50 @@ public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFi
         }
     }
 
-    private class DexEntry {
+    private class OatDexEntry implements MultiDexContainer.DexEntry<DexBackedDexFile> {
         public final String entryName;
         public final byte[] buf;
         public final int dexOffset;
 
-
-        public DexEntry(String entryName, byte[] buf, int dexOffset) {
+        public OatDexEntry(String entryName, byte[] buf, int dexOffset) {
             this.entryName = entryName;
             this.buf = buf;
             this.dexOffset = dexOffset;
         }
 
-        public OatDexFile getDexFile() {
-            return new OatDexFile(buf, dexOffset, entryName);
+        public DexBackedDexFile getDexFile() {
+            if (CDexBackedDexFile.isCdex(buf, dexOffset)) {
+                return new OatCDexFile(buf, dexOffset);
+            } else {
+                try {
+                    DexUtil.verifyDexHeader(buf, dexOffset);
+                } catch (DexBackedDexFile.NotADexFile ex) {
+                    if (getOatVersion() >= 87) {
+                        throw new DexFileFactory.DexFileNotFoundException(ex,
+                                "Could not locate the embedded dex file %s. Is the vdex file missing?", entryName);
+                    } else {
+                        throw new DexFileFactory.DexFileNotFoundException(ex,
+                                "The embedded dex file %s does not appear to be a valid dex file.", entryName);
+                    }
+                }
+                return new OatDexFile(buf, dexOffset);
+            }
+        }
+
+        @Nonnull
+        @Override
+        public String getEntryName() {
+            return entryName;
+        }
+
+        @Nonnull
+        @Override
+        public MultiDexContainer<? extends DexBackedDexFile> getContainer() {
+            return OatFile.this;
         }
     }
 
-    private class DexEntryIterator implements Iterator<DexEntry> {
+    private class DexEntryIterator implements Iterator<OatDexEntry> {
         int index = 0;
         int offset = oatHeader.getDexListStart();
 
@@ -581,48 +615,60 @@ public class OatFile extends BaseDexBuffer implements MultiDexContainer<OatDexFi
             return index < oatHeader.getDexFileCount();
         }
 
-        @Override public DexEntry next() {
-            int filenameLength = readSmallUint(offset);
-            offset += 4;
+        @Override public OatDexEntry next() {
 
-            // TODO: what is the correct character encoding?
-            String filename = new String(buf, offset, filenameLength, Charset.forName("US-ASCII"));
-            offset += filenameLength;
+            while (hasNext()) {
+                int filenameLength = readSmallUint(offset);
+                offset += 4;
 
-            offset += 4; // checksum
+                // TODO: what is the correct character encoding?
+                String filename = new String(buf, offset, filenameLength, Charset.forName("US-ASCII"));
+                offset += filenameLength;
 
-            int dexOffset = readSmallUint(offset);
-            offset += 4;
+                offset += 4; // checksum
 
-            byte[] buf;
-            if (getOatVersion() >= 87 && vdexProvider != null && vdexProvider.getVdex() != null) {
-                buf = vdexProvider.getVdex();
-            } else {
-                buf = OatFile.this.buf;
-                dexOffset += oatHeader.headerOffset;
+                int dexOffset = readSmallUint(offset);
+                offset += 4;
+
+                byte[] buf;
+                if (getOatVersion() >= 87 && vdexProvider != null && vdexProvider.getVdex() != null) {
+                    buf = vdexProvider.getVdex();
+                } else {
+                    buf = OatFile.this.buf;
+                    dexOffset += oatHeader.headerOffset;
+                }
+
+                if (getOatVersion() >= 75) {
+                    offset += 4; // offset to class offsets table
+                }
+                if (getOatVersion() >= 73) {
+                    offset += 4; // lookup table offset
+                }
+                if (getOatVersion() >= 131) {
+                    offset += 4; // dex sections layout offset
+                }
+                if (getOatVersion() >= 127) {
+                    offset += 4; // method bss mapping offset
+                }
+                if (getOatVersion() >= 135) {
+                    offset += 8; // type bss mapping and string bss mapping offsets
+                }
+                if (getOatVersion() < 75) {
+                    // prior to 75, the class offsets are included here directly
+                    int classCount = readSmallUint(dexOffset + HeaderItem.CLASS_COUNT_OFFSET);
+                    offset += 4 * classCount;
+                }
+
+                index++;
+
+                if (getOatVersion() >= 138 && dexOffset == 0) {
+                    // An offset of 0 indicates that the dex file remains in the apk. So we treat it as not a part of
+                    // the oat file.
+                    continue;
+                }
+                return new OatDexEntry(filename, buf, dexOffset);
             }
-
-            if (getOatVersion() >= 75) {
-                offset += 4; // offset to class offsets table
-            }
-            if (getOatVersion() >= 73) {
-                offset += 4; // lookup table offset
-            }
-            if (getOatVersion() >= 131) {
-                offset += 4; // dex sections layout offset
-            }
-            if (getOatVersion() >= 127) {
-                offset += 4; // method bss mapping offset
-            }
-            if (getOatVersion() < 75) {
-                // prior to 75, the class offsets are included here directly
-                int classCount = readSmallUint(dexOffset + HeaderItem.CLASS_COUNT_OFFSET);
-                offset += 4 * classCount;
-            }
-
-            index++;
-
-            return new DexEntry(filename, buf, dexOffset);
+            return null;
         }
 
         @Override public void remove() {
